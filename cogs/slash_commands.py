@@ -1,5 +1,14 @@
 """
-Discord 슬래시 커맨드 Cog (v3.2 - 드롭다운 모델 선택 추가)
+Discord 슬래시 커맨드 Cog (v3.4 - 레퍼런스 이미지 스타일 드롭다운)
+
+[수정 내역]
+- REDESIGN: /model 드롭다운을 레퍼런스 이미지 스타일로 전면 재설계
+  · embed 제거 → 심플한 텍스트 메시지 + 드롭다운만 표시
+  · "현재 LLM 모델: **모델명**" 형태로 현재 선택 표시
+  · placeholder = 현재 선택된 모델명 (체크마크로 default 표시)
+  · 각 항목: 이모지 + 모델명 + 특성 설명 (description 줄)
+  · 선택 즉시 메시지 텍스트 업데이트 (닫기 버튼 제거)
+- REDESIGN: /prompt 동일 스타일 적용
 """
 import discord
 from discord import app_commands
@@ -12,30 +21,117 @@ from utils.gemini_client import GeminiClient
 from utils.memo_manager import MemoManager
 
 
-# ========== 프롬프트 선택 드롭다운 UI ==========
+# ========== 모델별 메타 정보 ==========
+# (이모지, description 줄에 표시될 특성 설명)
+
+MODEL_META = {
+    'gemini-3-pro-preview':   ('🔮', '최고 성능 · 복잡한 추론 특화'),
+    'gemini-2.5-flash':       ('🤖', '빠른 응답 · 균형 잡힌 성능'),
+    'gemini-3-flash-preview': ('🤖', '차세대 Flash · 속도+품질 향상'),
+    'gemini-2.5-flash-lite':  ('🤖', '초경량 · 가장 빠른 응답속도'),
+}
+
+PROMPT_META = {
+    'Ultimate': ('🌟', '땅콩의 완전한 성격과 모든 특성'),
+    'Optimize': ('⚙️', '토큰 효율 최적화 · 간결한 응답'),
+}
+
+
+# ========== 모델 선택 드롭다운 ==========
+
+class ModelSelectDropdown(discord.ui.Select):
+    """
+    레퍼런스 스타일 모델 선택 드롭다운
+    - placeholder: 현재 선택된 모델명 표시
+    - 각 옵션: 이모지 + 모델명 (label) + 특성 설명 (description)
+    - default=True 인 항목에 체크마크(✓) 자동 표시
+    """
+
+    def __init__(self, gemini_client: GeminiClient):
+        self.gemini_client = gemini_client
+        current_model = gemini_client.model_name
+
+        options = []
+        for model in AVAILABLE_MODELS:
+            emoji, desc = MODEL_META.get(model, ('🤖', ''))
+            options.append(
+                discord.SelectOption(
+                    label=model,
+                    value=model,
+                    description=desc,
+                    emoji=emoji,
+                    default=(model == current_model)
+                )
+            )
+
+        super().__init__(
+            placeholder=current_model,   # 현재 모델명을 placeholder로 표시
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_model = self.values[0]
+        self.gemini_client.update_settings(model_name=selected_model)
+
+        # 선택 항목 default 업데이트 & placeholder 갱신
+        for option in self.options:
+            option.default = (option.value == selected_model)
+        self.placeholder = selected_model
+
+        emoji, _ = MODEL_META.get(selected_model, ('🤖', ''))
+        await interaction.response.edit_message(
+            content=f"현재 LLM 모델: **{selected_model}**\n변경할 모델을 선택해 주세요.",
+            view=self.view
+        )
+
+
+class ModelSelectView(discord.ui.View):
+    def __init__(self, gemini_client: GeminiClient):
+        super().__init__(timeout=120)
+        self.add_item(ModelSelectDropdown(gemini_client))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ========== 프롬프트 선택 드롭다운 ==========
 
 class PromptSelectDropdown(discord.ui.Select):
-    """프롬프트 선택 드롭다운 메뉴"""
+    """
+    레퍼런스 스타일 프롬프트 선택 드롭다운
+    - placeholder: 현재 선택된 프롬프트명 표시
+    - 각 옵션: 이모지 + 프롬프트명 (label) + 특성 설명 (description)
+    - 선택 즉시 히스토리 초기화 + 메시지 업데이트
+    """
 
     def __init__(self, gemini_client: GeminiClient, memo_manager, chat_handler):
         self.gemini_client = gemini_client
         self.memo_manager = memo_manager
         self.chat_handler = chat_handler
         current_file = gemini_client.current_prompt_file
+        current_name = next(
+            (p['name'] for p in AVAILABLE_PROMPTS if p['file'] == current_file), '프롬프트 선택'
+        )
 
-        options = [
-            discord.SelectOption(
-                label=p['name'],
-                value=str(i),
-                description=p.get('description', '')[:50],
-                emoji="📝",
-                default=(p['file'] == current_file)
+        options = []
+        for i, p in enumerate(AVAILABLE_PROMPTS):
+            emoji, meta_desc = PROMPT_META.get(p['name'], ('📝', ''))
+            display_desc = (p.get('description') or meta_desc)[:100]
+            options.append(
+                discord.SelectOption(
+                    label=p['name'],
+                    value=str(i),
+                    description=display_desc,
+                    emoji=emoji,
+                    default=(p['file'] == current_file)
+                )
             )
-            for i, p in enumerate(AVAILABLE_PROMPTS)
-        ]
 
         super().__init__(
-            placeholder="변경할 프롬프트를 선택하세요...",
+            placeholder=current_name,    # 현재 프롬프트명을 placeholder로 표시
             min_values=1,
             max_values=1,
             options=options
@@ -44,7 +140,6 @@ class PromptSelectDropdown(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         index = int(self.values[0])
         prompt_info = AVAILABLE_PROMPTS[index]
-
         success = self.gemini_client.load_system_prompt(prompt_info['file'])
 
         if success:
@@ -53,15 +148,15 @@ class PromptSelectDropdown(discord.ui.Select):
 
             for option in self.options:
                 option.default = (option.value == self.values[0])
+            self.placeholder = prompt_info['name']
 
-            embed = discord.Embed(
-                title="✅ 프롬프트 변경 완료",
-                description=f"**현재 프롬프트:** `{prompt_info['name']}`",
-                color=discord.Color.green()
+            await interaction.response.edit_message(
+                content=(
+                    f"현재 프롬프트: **{prompt_info['name']}**\n"
+                    f"변경할 프롬프트를 선택해 주세요. *(변경 시 대화 히스토리 초기화)*"
+                ),
+                view=self.view
             )
-            embed.add_field(name="⚠️ 안내", value="대화 히스토리가 초기화되었습니다.", inline=False)
-
-            await interaction.response.edit_message(embed=embed, view=self.view)
         else:
             await interaction.response.send_message(
                 f"❌ 프롬프트 파일 로드 실패: `{prompt_info['file']}`", ephemeral=True
@@ -69,86 +164,11 @@ class PromptSelectDropdown(discord.ui.Select):
 
 
 class PromptSelectView(discord.ui.View):
-    """프롬프트 선택 View (드롭다운 + 닫기 버튼)"""
-
     def __init__(self, gemini_client: GeminiClient, memo_manager, chat_handler):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
         self.add_item(PromptSelectDropdown(gemini_client, memo_manager, chat_handler))
 
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.secondary, emoji="✖️")
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="🚪 프롬프트 선택이 닫혔습니다.",
-            embed=None,
-            view=None
-        )
-
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-
-
-# ========== 모델 선택 드롭다운 UI ==========
-
-class ModelSelectDropdown(discord.ui.Select):
-    """모델 선택 드롭다운 메뉴"""
-    
-    def __init__(self, gemini_client: GeminiClient):
-        self.gemini_client = gemini_client
-        current_model = gemini_client.model_name
-        
-        options = [
-            discord.SelectOption(
-                label=model,
-                value=model,
-                description=f"모델 {i+1}",
-                emoji="🤖",
-                default=(model == current_model)
-            )
-            for i, model in enumerate(AVAILABLE_MODELS)
-        ]
-        
-        super().__init__(
-            placeholder="변경할 모델을 선택하세요...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        selected_model = self.values[0]
-        self.gemini_client.update_settings(model_name=selected_model)
-        
-        # 선택된 항목을 default로 업데이트
-        for option in self.options:
-            option.default = (option.value == selected_model)
-        
-        embed = discord.Embed(
-            title="✅ 모델 변경 완료",
-            description=f"**현재 모델:** `{selected_model}`",
-            color=discord.Color.green()
-        )
-        
-        await interaction.response.edit_message(embed=embed, view=self.view)
-
-
-class ModelSelectView(discord.ui.View):
-    """모델 선택 View (드롭다운 + 취소 버튼 포함)"""
-    
-    def __init__(self, gemini_client: GeminiClient):
-        super().__init__(timeout=60)
-        self.add_item(ModelSelectDropdown(gemini_client))
-    
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.secondary, emoji="✖️")
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="🚪 모델 선택이 닫혔습니다.",
-            embed=None,
-            view=None
-        )
-    
-    async def on_timeout(self):
-        """타임아웃 시 View 비활성화"""
         for item in self.children:
             item.disabled = True
 
@@ -186,23 +206,13 @@ class SlashCommands(commands.Cog):
 
     @app_commands.command(name="model", description="AI 모델 목록 확인 및 변경 (드롭다운)")
     async def model_select(self, interaction: discord.Interaction):
-        """모델 목록을 보여주고 드롭다운으로 즉시 선택·변경"""
         current_model = self.gemini_client.model_name
-
-        model_list = "\n".join([
-            f"{'✅' if m == current_model else '▫️'} `{m}`"
-            for m in AVAILABLE_MODELS
-        ])
-
-        embed = discord.Embed(
-            title="🤖 AI 모델 선택",
-            description=f"**현재 모델:** `{current_model}`\n\n{model_list}\n\n아래 드롭다운에서 모델을 클릭하면 즉시 변경됩니다.",
-            color=discord.Color.blue()
-        )
-        embed.set_footer(text="60초 안에 선택하지 않으면 자동으로 닫힙니다.")
-
         view = ModelSelectView(self.gemini_client)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(
+            content=f"현재 LLM 모델: **{current_model}**\n변경할 모델을 선택해 주세요.",
+            view=view,
+            ephemeral=True
+        )
     
     # ========== Split 명령어 ==========
     
@@ -222,26 +232,19 @@ class SlashCommands(commands.Cog):
 
     @app_commands.command(name="prompt", description="프롬프트 목록 확인 및 변경 (드롭다운)")
     async def prompt_select(self, interaction: discord.Interaction):
-        """모델 선택과 동일한 드롭다운 방식으로 프롬프트 변경"""
         current_file = self.gemini_client.current_prompt_file
         current_name = next(
             (p['name'] for p in AVAILABLE_PROMPTS if p['file'] == current_file), "Unknown"
         )
-
-        prompt_list = "\n".join([
-            f"{'✅' if p['file'] == current_file else '▫️'} `{p['name']}`"
-            for p in AVAILABLE_PROMPTS
-        ])
-
-        embed = discord.Embed(
-            title="📝 프롬프트 선택",
-            description=f"**현재 프롬프트:** `{current_name}`\n\n{prompt_list}\n\n아래 드롭다운에서 프롬프트를 클릭하면 즉시 변경됩니다.",
-            color=discord.Color.from_rgb(114, 137, 218)
-        )
-        embed.set_footer(text="60초 안에 선택하지 않으면 자동으로 닫힙니다.")
-
         view = PromptSelectView(self.gemini_client, self.memo_manager, self.chat_handler)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(
+            content=(
+                f"현재 프롬프트: **{current_name}**\n"
+                f"변경할 프롬프트를 선택해 주세요. *(변경 시 대화 히스토리 초기화)*"
+            ),
+            view=view,
+            ephemeral=True
+        )
     
     # ========== 🆕 히스토리 관리 명령어 ==========
     
