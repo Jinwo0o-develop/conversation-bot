@@ -244,7 +244,13 @@ class ChatHandler(commands.Cog):
             if self.split_mode:
                 await self.send_split_message(channel, response_text)
             else:
-                await channel.send(response_text.replace('\\n', '\n'))
+                sent_msg = await channel.send(response_text.replace('\\n', '\n'))
+                # 봇 응답에도 감정 리액션 추가 (ReactionHandler가 로드된 경우)
+                reaction_cog = self.bot.cogs.get('ReactionHandler')
+                if reaction_cog:
+                    asyncio.create_task(
+                        reaction_cog.react_to_bot_response(sent_msg)
+                    )
 
             print(f"💬 {user_id} 사용자와 대화 (히스토리: {len(self.get_user_history(user_id))}개)")
 

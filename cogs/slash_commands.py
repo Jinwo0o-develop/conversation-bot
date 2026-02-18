@@ -97,25 +97,22 @@ class ModelSelectView(discord.ui.View):
             item.disabled = True
 
 
-# ========== 프롬프트 선택 드롭다운 ==========
+# ========== 프롬프트 변경 드롭다운 (변경 버튼 클릭 후 표시) ==========
 
 class PromptSelectDropdown(discord.ui.Select):
     """
-    레퍼런스 스타일 프롬프트 선택 드롭다운
-    - placeholder: 현재 선택된 프롬프트명 표시
-    - 각 옵션: 이모지 + 프롬프트명 (label) + 특성 설명 (description)
-    - 선택 즉시 히스토리 초기화 + 메시지 업데이트
+    /model과 동일한 방식의 프롬프트 변경 드롭다운
+    - placeholder: 현재 선택된 프롬프트명
+    - 선택 즉시 적용 + 메시지 업데이트
     """
-
     def __init__(self, gemini_client: GeminiClient, memo_manager, chat_handler):
         self.gemini_client = gemini_client
-        self.memo_manager = memo_manager
-        self.chat_handler = chat_handler
+        self.memo_manager  = memo_manager
+        self.chat_handler  = chat_handler
         current_file = gemini_client.current_prompt_file
         current_name = next(
             (p['name'] for p in AVAILABLE_PROMPTS if p['file'] == current_file), '프롬프트 선택'
         )
-
         options = []
         for i, p in enumerate(AVAILABLE_PROMPTS):
             emoji, meta_desc = PROMPT_META.get(p['name'], ('📝', ''))
@@ -129,32 +126,26 @@ class PromptSelectDropdown(discord.ui.Select):
                     default=(p['file'] == current_file)
                 )
             )
-
         super().__init__(
-            placeholder=current_name,    # 현재 프롬프트명을 placeholder로 표시
+            placeholder=current_name,
             min_values=1,
             max_values=1,
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        index = int(self.values[0])
+        index       = int(self.values[0])
         prompt_info = AVAILABLE_PROMPTS[index]
-        success = self.gemini_client.load_system_prompt(prompt_info['file'])
+        success     = self.gemini_client.load_system_prompt(prompt_info['file'])
 
         if success:
             self.gemini_client.update_memories(self.memo_manager.get_memories_as_text())
             self.chat_handler.clear_history()
-
             for option in self.options:
                 option.default = (option.value == self.values[0])
             self.placeholder = prompt_info['name']
-
             await interaction.response.edit_message(
-                content=(
-                    f"현재 프롬프트: **{prompt_info['name']}**\n"
-                    f"변경할 프롬프트를 선택해 주세요. *(변경 시 대화 히스토리 초기화)*"
-                ),
+                content=f"현재 프롬프트: **{prompt_info['name']}**\n변경할 프롬프트를 선택해 주세요. *(변경 시 대화 히스토리 초기화)*",
                 view=self.view
             )
         else:
@@ -163,14 +154,97 @@ class PromptSelectDropdown(discord.ui.Select):
             )
 
 
-class PromptSelectView(discord.ui.View):
-    def __init__(self, gemini_client: GeminiClient, memo_manager, chat_handler):
+class PromptChangeView(discord.ui.View):
+    """
+    변경 버튼 클릭 후 표시되는 View — /model과 동일한 드롭다운 방식
+    - row=0: 드롭다운 (프롬프트 선택)
+    - row=1: 뒤로가기 버튼
+    """
+    def __init__(self, gemini_client: GeminiClient, memo_manager, chat_handler, persona_handler=None):
         super().__init__(timeout=120)
+        self.gemini_client  = gemini_client
+        self.memo_manager   = memo_manager
+        self.chat_handler   = chat_handler
+        self.persona_handler = persona_handler
         self.add_item(PromptSelectDropdown(gemini_client, memo_manager, chat_handler))
+
+    @discord.ui.button(label="← 뒤로", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """메인 /prompt View로 돌아가기"""
+        current_file = self.gemini_client.current_prompt_file
+        current_name = next(
+            (p['name'] for p in AVAILABLE_PROMPTS if p['file'] == current_file), "Unknown"
+        )
+        view = PromptMainView(self.gemini_client, self.memo_manager, self.chat_handler, self.persona_handler)
+        await interaction.response.edit_message(
+            content=(
+                f"현재 프롬프트: **{current_name}**\n"
+                f"원하는 작업을 선택해 주세요."
+            ),
+            view=view
+        )
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+
+
+class PromptMainView(discord.ui.View):
+    """
+    /prompt 실행 시 표시되는 메인 View
+    - row=0: 🔄 변경 버튼 (클릭 시 드롭다운 View로 교체)
+    - row=1: 페르소나 빌더 버튼 3개
+    """
+    def __init__(self, gemini_client: GeminiClient, memo_manager, chat_handler, persona_handler=None):
+        super().__init__(timeout=120)
+        self.gemini_client   = gemini_client
+        self.memo_manager    = memo_manager
+        self.chat_handler    = chat_handler
+        self.persona_handler = persona_handler
+
+    # ── row=0: 변경 버튼 ─────────────────────────────────────────
+    @discord.ui.button(label="🔄 변경", style=discord.ButtonStyle.primary, row=0)
+    async def btn_change(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """클릭 시 드롭다운이 포함된 PromptChangeView로 교체"""
+        current_file = self.gemini_client.current_prompt_file
+        current_name = next(
+            (p['name'] for p in AVAILABLE_PROMPTS if p['file'] == current_file), "Unknown"
+        )
+        view = PromptChangeView(self.gemini_client, self.memo_manager, self.chat_handler, self.persona_handler)
+        await interaction.response.edit_message(
+            content=f"현재 프롬프트: **{current_name}**\n변경할 프롬프트를 선택해 주세요. *(변경 시 대화 히스토리 초기화)*",
+            view=view
+        )
+
+    # ── row=1: 페르소나 빌더 버튼 3개 ────────────────────────────
+    @discord.ui.button(label="📋 요구사항 추출", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_extraction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.persona_handler is None:
+            await interaction.response.send_message("❌ 페르소나 모듈이 로드되지 않았습니다.", ephemeral=True)
+            return
+        await self.persona_handler.start_session(interaction, "extraction")
+
+    @discord.ui.button(label="🛠 기법 적용", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_technique(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.persona_handler is None:
+            await interaction.response.send_message("❌ 페르소나 모듈이 로드되지 않았습니다.", ephemeral=True)
+            return
+        await self.persona_handler.start_session(interaction, "technique")
+
+    @discord.ui.button(label="✨ 프롬프트 생성", style=discord.ButtonStyle.success, row=1)
+    async def btn_generator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.persona_handler is None:
+            await interaction.response.send_message("❌ 페르소나 모듈이 로드되지 않았습니다.", ephemeral=True)
+            return
+        await self.persona_handler.start_session(interaction, "generator")
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# 하위 호환성을 위한 별칭 (기존 코드가 PromptSelectView를 참조할 경우 대비)
+PromptSelectView = PromptMainView
 
 
 class SlashCommands(commands.Cog):
@@ -230,17 +304,23 @@ class SlashCommands(commands.Cog):
     
     # ========== 프롬프트 명령어 ==========
 
-    @app_commands.command(name="prompt", description="프롬프트 목록 확인 및 변경 (드롭다운)")
+    @app_commands.command(name="prompt", description="프롬프트 변경 및 페르소나 빌더")
     async def prompt_select(self, interaction: discord.Interaction):
         current_file = self.gemini_client.current_prompt_file
         current_name = next(
             (p['name'] for p in AVAILABLE_PROMPTS if p['file'] == current_file), "Unknown"
         )
-        view = PromptSelectView(self.gemini_client, self.memo_manager, self.chat_handler)
+        persona_handler = self.bot.cogs.get('PersonaHandler')
+        view = PromptMainView(
+            self.gemini_client,
+            self.memo_manager,
+            self.chat_handler,
+            persona_handler=persona_handler
+        )
         await interaction.response.send_message(
             content=(
                 f"현재 프롬프트: **{current_name}**\n"
-                f"변경할 프롬프트를 선택해 주세요. *(변경 시 대화 히스토리 초기화)*"
+                f"원하는 작업을 선택해 주세요."
             ),
             view=view,
             ephemeral=True

@@ -19,9 +19,14 @@ from config.settings import (
 )
 from utils.gemini_client import GeminiClient
 from utils.memo_manager import MemoManager
+from utils.emotion_analyzer import EmotionAnalyzer
 from cogs.chat_handler import ChatHandler
 from cogs.commands import BotCommands
 from cogs.slash_commands import SlashCommands
+from cogs.reaction_handler import ReactionHandler
+from cogs.persona_handler import PersonaHandler
+from cogs.scheduler import Scheduler
+from cogs.weather_handler import WeatherHandler
 
 
 class PeanutBot:
@@ -32,12 +37,16 @@ class PeanutBot:
 
         self.discord_token = os.getenv('DISCORD_BOT_TOKEN')
         self.google_api_key = os.getenv('GOOGLE_API_KEY')
+        self.weather_api_key = os.getenv('OPENWEATHER_API_KEY')  # 새 추가
 
         if not self.discord_token or not self.google_api_key:
             raise ValueError(
                 "❌ .env 파일에 API 키가 설정되지 않았습니다!\n"
                 "DISCORD_BOT_TOKEN과 GOOGLE_API_KEY를 확인하세요."
             )
+
+        if not self.weather_api_key:
+            print("⚠️ OPENWEATHER_API_KEY가 설정되지 않아 날씨 기능이 비활성화됩니다.")
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -60,11 +69,17 @@ class PeanutBot:
             max_output_tokens=MAX_OUTPUT_TOKENS
         )
 
-        self.memo_manager = MemoManager(memo_file=MEMO_FILE)
+        self.memo_manager     = MemoManager(memo_file=MEMO_FILE)
+        # gemini_client 이후에 생성 — model_name 동기화를 위해 참조 전달
+        self.emotion_analyzer = EmotionAnalyzer(
+            api_key=self.google_api_key,
+            gemini_client=self.gemini_client
+        )
 
-        self.chat_handler = None
-        self.bot_commands = None
-        self.slash_commands = None
+        self.chat_handler    = None
+        self.bot_commands    = None
+        self.slash_commands  = None
+        self.reaction_handler = None
 
         self.setup_events()
 
@@ -104,27 +119,50 @@ class PeanutBot:
 
     async def setup_cogs(self):
         """Cogs 설정 및 추가"""
+        # bot 객체에 공유 인스턴스 등록 (동적 로드 대비)
+        self.bot.gemini_client    = self.gemini_client
+        self.bot.memo_manager     = self.memo_manager
+        self.bot.emotion_analyzer = self.emotion_analyzer
+
         self.chat_handler = ChatHandler(self.bot, self.gemini_client)
         await self.bot.add_cog(self.chat_handler)
+        self.bot.chat_handler = self.chat_handler
         print("✅ ChatHandler Cog 로드 완료")
 
         self.bot_commands = BotCommands(
-            self.bot,
-            self.gemini_client,
-            self.chat_handler,
-            self.memo_manager
+            self.bot, self.gemini_client, self.chat_handler, self.memo_manager
         )
         await self.bot.add_cog(self.bot_commands)
         print("✅ BotCommands Cog 로드 완료")
 
         self.slash_commands = SlashCommands(
-            self.bot,
-            self.gemini_client,
-            self.chat_handler,
-            self.memo_manager
+            self.bot, self.gemini_client, self.chat_handler, self.memo_manager
         )
         await self.bot.add_cog(self.slash_commands)
         print("✅ SlashCommands Cog 로드 완료")
+
+        self.reaction_handler = ReactionHandler(self.bot, self.emotion_analyzer)
+        await self.bot.add_cog(self.reaction_handler)
+        print("✅ ReactionHandler Cog 로드 완료")
+
+        # bot 객체에 api_key 등록 (PersonaHandler 동적 로드 대비)
+        self.bot.google_api_key = self.google_api_key
+        self.persona_handler = PersonaHandler(self.bot, self.google_api_key)
+        await self.bot.add_cog(self.persona_handler)
+        print("✅ PersonaHandler Cog 로드 완료")
+
+        self.scheduler = Scheduler(self.bot)
+        await self.bot.add_cog(self.scheduler)
+        print("✅ Scheduler Cog 로드 완료")
+
+        # WeatherHandler (API 키 있을 때만)
+        if self.weather_api_key:
+            self.bot.weather_api_key = self.weather_api_key
+            self.weather_handler = WeatherHandler(self.bot, self.weather_api_key)
+            await self.bot.add_cog(self.weather_handler)
+            print("✅ WeatherHandler Cog 로드 완료")
+        else:
+            print("⏭️ WeatherHandler Cog 스킵 (API 키 없음)")
 
         # Guild 단위 즉시 동기화 (Discord 반영 즉시)
         MY_GUILD = discord.Object(id=int(os.getenv('GUILD_ID', '0')) or SERVER_ID)

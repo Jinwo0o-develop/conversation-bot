@@ -30,3 +30,5 @@ AVAILABLE_PROMPTS = [
     {'name': 'Optimize', 'file': 'data/prompts/Peanut_prompt_optimize.txt', 'description': '최적화된 프롬프트'}
 ]
 DEFAULT_PROMPT_INDEX = 0
+# 멀티 페르소나 프롬프트 빌더 전용 채널
+CHANNEL_PERSONA = 1462774351740014633

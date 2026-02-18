@@ -1,5 +1,5 @@
 import aiohttp
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime
 
 class WeatherClient:
@@ -17,7 +17,17 @@ class WeatherClient:
         else: return "매우 강함! 🚨"
     
     def interpret_weather(self, weather_main: str, weather_desc: str) -> str:
-        weather_map = {"Clear": "☀️ 맑음", "Clouds": "☁️ 구름", "Rain": "🌧️ 비", "Drizzle": "🌦️ 이슬비", "Thunderstorm": "⛈️ 천둥번개", "Snow": "❄️ 눈", "Mist": "🌫️ 안개", "Fog": "🌫️ 짙은 안개", "Haze": "🌁 실안개"}
+        weather_map = {
+            "Clear": "☀️ 맑음",
+            "Clouds": "☁️ 구름",
+            "Rain": "🌧️ 비",
+            "Drizzle": "🌦️ 이슬비",
+            "Thunderstorm": "⛈️ 천둥번개",
+            "Snow": "❄️ 눈",
+            "Mist": "🌫️ 안개",
+            "Fog": "🌫️ 짙은 안개",
+            "Haze": "🌁 실안개"
+        }
         return weather_map.get(weather_main, f"🌈 {weather_main}")
     
     def interpret_clouds(self, clouds_percent: int) -> str:
@@ -27,6 +37,7 @@ class WeatherClient:
         else: return "많이 흐림 🌥️"
     
     async def get_current_weather(self, city: str, lang: str = "kr") -> Optional[Dict]:
+        """현재 날씨 조회"""
         params = {"q": city, "appid": self.api_key, "units": "metric", "lang": lang}
         try:
             async with aiohttp.ClientSession() as session:
@@ -40,14 +51,66 @@ class WeatherClient:
     
     def _parse_current_weather(self, data: Dict) -> Dict:
         return {
-            "city": data["name"], "country": data["sys"]["country"],
-            "temp": round(data["main"]["temp"], 1), "feels_like": round(data["main"]["feels_like"], 1),
-            "temp_min": round(data["main"]["temp_min"], 1), "temp_max": round(data["main"]["temp_max"], 1),
-            "humidity": data["main"]["humidity"], "pressure": data["main"]["pressure"],
-            "wind_speed": data["wind"]["speed"], "wind_speed_text": self.interpret_wind_speed(data["wind"]["speed"]),
-            "clouds": data["clouds"]["all"], "clouds_text": self.interpret_clouds(data["clouds"]["all"]),
-            "weather_main": data["weather"][0]["main"], "weather_desc": data["weather"][0]["description"],
+            "city": data["name"],
+            "country": data["sys"]["country"],
+            "temp": round(data["main"]["temp"], 1),
+            "feels_like": round(data["main"]["feels_like"], 1),
+            "temp_min": round(data["main"]["temp_min"], 1),
+            "temp_max": round(data["main"]["temp_max"], 1),
+            "humidity": data["main"]["humidity"],
+            "pressure": data["main"]["pressure"],
+            "wind_speed": data["wind"]["speed"],
+            "wind_speed_text": self.interpret_wind_speed(data["wind"]["speed"]),
+            "clouds": data["clouds"]["all"],
+            "clouds_text": self.interpret_clouds(data["clouds"]["all"]),
+            "weather_main": data["weather"][0]["main"],
+            "weather_desc": data["weather"][0]["description"],
             "weather_text": self.interpret_weather(data["weather"][0]["main"], data["weather"][0]["description"]),
-            "rain": data.get("rain", {}).get("1h", 0), "snow": data.get("snow", {}).get("1h", 0),
+            "rain": data.get("rain", {}).get("1h", 0),
+            "snow": data.get("snow", {}).get("1h", 0),
             "timestamp": datetime.now()
         }
+
+    async def get_forecast(self, city: str, lang: str = "kr") -> Optional[List[Dict]]:
+        """
+        5일 예보 조회 (3시간 간격, 최대 40개 데이터)
+        오늘 하루치만 필요하면 호출부에서 필터링
+        """
+        params = {"q": city, "appid": self.api_key, "units": "metric", "lang": lang}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.base_url}/forecast", params=params) as response:
+                    if response.status == 200:
+                        return self._parse_forecast(await response.json())
+                    return None
+        except Exception as e:
+            print(f"❌ 예보 API 오류: {e}")
+            return None
+
+    def _parse_forecast(self, data: Dict) -> List[Dict]:
+        """예보 데이터 파싱"""
+        forecasts = []
+        for item in data["list"]:
+            forecasts.append({
+                "city": data["city"]["name"],
+                "country": data["city"]["country"],
+                "dt": datetime.fromtimestamp(item["dt"]),
+                "dt_txt": item["dt_txt"],
+                "temp": round(item["main"]["temp"], 1),
+                "feels_like": round(item["main"]["feels_like"], 1),
+                "temp_min": round(item["main"]["temp_min"], 1),
+                "temp_max": round(item["main"]["temp_max"], 1),
+                "humidity": item["main"]["humidity"],
+                "pressure": item["main"]["pressure"],
+                "wind_speed": item["wind"]["speed"],
+                "wind_speed_text": self.interpret_wind_speed(item["wind"]["speed"]),
+                "clouds": item["clouds"]["all"],
+                "clouds_text": self.interpret_clouds(item["clouds"]["all"]),
+                "weather_main": item["weather"][0]["main"],
+                "weather_desc": item["weather"][0]["description"],
+                "weather_text": self.interpret_weather(item["weather"][0]["main"], item["weather"][0]["description"]),
+                "rain_3h": item.get("rain", {}).get("3h", 0),
+                "snow_3h": item.get("snow", {}).get("3h", 0),
+                "pop": item.get("pop", 0) * 100  # 강수 확률 (%)
+            })
+        return forecasts
